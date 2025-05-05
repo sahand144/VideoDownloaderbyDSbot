@@ -139,7 +139,7 @@ if __name__ == "__main__":
     import asyncio
     TOKEN = "YOUR_BOT_TOKEN"  # Replace with your real Telegram Bot token
 
-    application = ApplicationBuilder().token(TOKEN).build()
+    application = Application.builder().token("7716345166:AAGtGli62R6QNfldkPkonTBEkqRHXiZDw-A").build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
