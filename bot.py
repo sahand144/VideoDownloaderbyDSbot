@@ -1,28 +1,32 @@
 import os
-import subprocess
 import logging
-import uuid
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
-)
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
 from yt_dlp import YoutubeDL
 
-# === Setup ===
-logging.basicConfig(level=logging.INFO)
-TOKEN = os.getenv("BOT_TOKEN")
-DOWNLOAD_DIR = "downloads"
-MAX_SIZE_MB = 50
+# Enable logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# === Helper Functions ===
+# Store user sessions temporarily
+user_sessions = {}
+
+# Define a function to extract formats from the video
 def get_video_formats(url):
-    """Extracts mp4 formats with resolution and audio."""
-    ydl_opts = {"quiet": True}
+    ydl_opts = {
+        "quiet": True,
+        "noplaylist": True,
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    }
+
+    # Add cookies for Instagram if file exists
+    cookie_file = "instagram.com_cookies.txt"
+    if "instagram.com" in url and os.path.exists(cookie_file):
+        ydl_opts["cookiefile"] = cookie_file
+
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         formats = info.get("formats", [])
@@ -31,107 +35,114 @@ def get_video_formats(url):
             if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("ext") == "mp4":
                 label = f"{f.get('format_note', '')} {f.get('height', '')}p"
                 filtered.append((label.strip(), f["format_id"]))
-        return filtered[:4], info
+        return filtered[:4], info  # Show 3–4 best options
 
-def format_size(bytes):
-    return round(bytes / (1024 * 1024), 2)
+# Handle /start command
+async def start(update: Update, context: CallbackContext):
+    await update.message.reply_text("🎬 Send me a video link and I'll fetch the formats for you!")
 
-def split_video(path):
-    """Splits video into ~4-minute chunks if size > 50MB."""
-    output_files = []
-    probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT
-    )
-    duration = float(probe.stdout)
-    chunk_duration = 240  # seconds
-    n_chunks = int(duration // chunk_duration) + 1
-
-    for i in range(n_chunks):
-        out_file = f"{path}_part{i+1}.mp4"
-        subprocess.run([
-            "ffmpeg", "-i", path, "-ss", str(i * chunk_duration), "-t",
-            str(chunk_duration), "-c", "copy", out_file, "-y"
-        ])
-        output_files.append(out_file)
-    return output_files
-
-# === Telegram Bot Handlers ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📥 Send me a video link to download!")
-
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Handle incoming links
+async def handle_link(update: Update, context: CallbackContext):
     url = update.message.text.strip()
     try:
-        options, info = get_video_formats(url)
-
-        if not options:
-            await update.message.reply_text("❌ No suitable formats found.")
+        formats, info = get_video_formats(url)
+        if not formats:
+            await update.message.reply_text("❌ No downloadable formats found.")
             return
 
-        duration = info.get("duration", 0)
-        if duration > 7200:
-            await update.message.reply_text("❌ Video too long (>2 hours). Try a shorter one.")
-            return
-        elif duration > 1800:
-            await update.message.reply_text("⚠️ This is a long video. It may take longer to process.")
-
-        context.user_data["video_url"] = url
         keyboard = [
             [InlineKeyboardButton(label, callback_data=f"{url}|{fmt_id}")]
-            for label, fmt_id in options
+            for label, fmt_id in formats
         ]
-        markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("✅ Choose video quality:", reply_markup=markup)
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
+        # Save session
+        user_sessions[update.effective_user.id] = {"url": url}
+
+        await update.message.reply_text("📥 Choose a quality:", reply_markup=reply_markup)
     except Exception as e:
-        logging.error(e)
+        logger.error(str(e))
         await update.message.reply_text("❌ Couldn't fetch video info. Make sure the link is correct.")
 
-async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Handle button selection
+async def button_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
-    try:
-        url, fmt_id = query.data.split("|")
-        file_id = str(uuid.uuid4())
-        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-        output_path = f"{DOWNLOAD_DIR}/{file_id}.mp4"
+    user_id = query.from_user.id
+    data = query.data
 
+    if "|" not in data:
+        await query.edit_message_text("❌ Invalid format selection.")
+        return
+
+    url, fmt_id = data.split("|")
+    output_path = f"{user_id}_{fmt_id}.mp4"
+
+    try:
         ydl_opts = {
             "format": fmt_id,
             "outtmpl": output_path,
             "quiet": True,
+            "noplaylist": True,
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         }
 
-        await query.edit_message_text("📥 Downloading your selected quality...")
+        cookie_file = "instagram.com_cookies.txt"
+        if "instagram.com" in url and os.path.exists(cookie_file):
+            ydl_opts["cookiefile"] = cookie_file
+
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        size = os.path.getsize(output_path) / (1024 * 1024)
-        if size > MAX_SIZE_MB:
-            await query.message.reply_text(f"📦 Video size: {format_size(size)}MB. Splitting into chunks...")
-            chunks = split_video(output_path)
-            for chunk in chunks:
-                with open(chunk, "rb") as f:
-                    await query.message.reply_video(f)
-                os.remove(chunk)
+        # Check file size
+        file_size = os.path.getsize(output_path)
+        if file_size > 50 * 1024 * 1024:
+            await query.edit_message_text("📦 File is large, sending in chunks...")
+            await split_and_send_large_file(context, query.message.chat_id, output_path)
         else:
-            with open(output_path, "rb") as f:
-                await query.message.reply_video(f)
+            await context.bot.send_video(chat_id=query.message.chat_id, video=open(output_path, "rb"))
+
         os.remove(output_path)
-
     except Exception as e:
-        logging.error(e)
-        await query.message.reply_text("❌ Error downloading or sending the video.")
+        logger.error(str(e))
+        await query.edit_message_text("❌ Error during download.")
 
-# === Main Runner ===
+# Split large file into 50MB chunks using FFmpeg
+async def split_and_send_large_file(context, chat_id, filepath):
+    import subprocess
+
+    base_name = os.path.splitext(filepath)[0]
+    chunk_dir = f"{base_name}_chunks"
+    os.makedirs(chunk_dir, exist_ok=True)
+
+    cmd = [
+        "ffmpeg",
+        "-i", filepath,
+        "-c", "copy",
+        "-map", "0",
+        "-f", "segment",
+        "-segment_time", "60",
+        f"{chunk_dir}/out%03d.mp4"
+    ]
+    subprocess.run(cmd, check=True)
+
+    for fname in sorted(os.listdir(chunk_dir)):
+        full_path = os.path.join(chunk_dir, fname)
+        await context.bot.send_video(chat_id=chat_id, video=open(full_path, "rb"))
+        os.remove(full_path)
+    os.rmdir(chunk_dir)
+    os.remove(filepath)
+
+# Main bot entry
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
+    import asyncio
+    TOKEN = "YOUR_BOT_TOKEN"  # Replace with your real Telegram Bot token
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    app.add_handler(CallbackQueryHandler(handle_quality_choice))
+    application = ApplicationBuilder().token(TOKEN).build()
 
-    app.run_polling()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    application.add_handler(CallbackQueryHandler(button_callback))
+
+    print("Bot is running...")
+    application.run_polling()
