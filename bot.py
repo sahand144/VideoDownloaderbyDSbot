@@ -137,9 +137,9 @@ async def split_and_send_large_file(context, chat_id, filepath):
 # Main bot entry
 if __name__ == "__main__":
     import asyncio
-    TOKEN = "YOUR_BOT_TOKEN"  # Replace with your real Telegram Bot token
-
-    application = Application.builder().token("7716345166:AAGtGli62R6QNfldkPkonTBEkqRHXiZDw-A").build()
+    import os
+    token = os.getenv("BOT_TOKEN")  # Ensure this is actually set
+    Application.builder().token(token).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
