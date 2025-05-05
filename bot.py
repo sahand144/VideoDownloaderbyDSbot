@@ -20,12 +20,13 @@ def get_video_formats(url):
         "quiet": True,
         "noplaylist": True,
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "cookiefile": "cookies.txt",  # Automatically use cookies.txt if available
+        "writeinfojson": True,  # This writes additional info about the video
     }
 
-    # Add cookies for Instagram if file exists
-    cookie_file = "instagram.com_cookies.txt"
-    if "instagram.com" in url and os.path.exists(cookie_file):
-        ydl_opts["cookiefile"] = cookie_file
+    if "instagram.com" in url:
+        # Automatically handle cookies extraction
+        ydl_opts["cookiesfrombrowser"] = True  # Extract cookies from your browser automatically
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
