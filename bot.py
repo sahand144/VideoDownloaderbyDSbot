@@ -138,8 +138,9 @@ async def split_and_send_large_file(context, chat_id, filepath):
 if __name__ == "__main__":
     import asyncio
     import os
+    from telegram.ext import Application, ApplicationBuilder
     token = os.getenv("BOT_TOKEN")  # Ensure this is actually set
-    application = Application.builder().token(token).build()
+    application = ApplicationBuilder().token(token).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
