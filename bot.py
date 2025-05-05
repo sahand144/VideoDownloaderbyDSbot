@@ -3,7 +3,6 @@ import os
 import logging
 from datetime import datetime, timedelta
 from tempfile import gettempdir
-import browser_cookie3
 from urllib.parse import urlparse
 
 import ffmpeg
@@ -26,7 +25,8 @@ import yt_dlp
 
 # Configure logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -43,55 +43,57 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 class VideoProcessor:
     @staticmethod
     def get_ytdlp_options():
-        """Generate yt-dlp options with cookies."""
-        # Try to get cookies from browser
-        cookies = None
-        try:
-            cookies = browser_cookie3.load()
-        except Exception as e:
-            logger.warning(f"Could not load cookies: {e}")
-
-        ydl_opts = {
+        """Generate yt-dlp options."""
+        return {
             "quiet": True,
             "no_warnings": True,
             "extract_flat": False,
-            "cookiefile": cookies if cookies else None,
             "referer": "https://www.instagram.com/",
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "extractor_args": {
-                "instagram": {
-                    "format": "best",
-                    "cookie": "yes" if cookies else "no"
-                },
-                "twitter": {
-                    "format": "best",
-                    "cookie": "yes" if cookies else "no"
-                }
+                "instagram": {"format": "best"}
             }
         }
-        return ydl_opts
 
     @staticmethod
     def get_formats_info(url: str) -> tuple:
         """Get available formats and video info."""
-        try:
-            domain = urlparse(url).netloc
-            ydl_opts = VideoProcessor.get_ytdlp_options()
-            
-            # Special handling for Instagram
-            if "instagram.com" in domain:
-                ydl_opts["extractor_args"]["instagram"]["cookie"] = "yes"
-                ydl_opts["cookiesfrombrowser"] = ("chrome",)  # Try chrome cookies
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if not info:
-                    raise ValueError("No info returned")
-                return info, ydl.list_formats(info)
-        except Exception as e:
-            logger.error(f"Error getting formats: {e}")
-            raise
+        with yt_dlp.YoutubeDL(VideoProcessor.get_ytdlp_options()) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info, ydl.list_formats(info)
 
+    @staticmethod
+    def select_best_format(formats: list) -> str:
+        """Automatically select the best balanced format."""
+        preferred = []
+        for f in formats:
+            if f.get('acodec') == 'none' and f.get('vcodec') != 'none':
+                continue
+            if f.get('ext') == 'mp4':
+                preferred.append(f)
+                
+        if not preferred:
+            return "best"
+            
+        for res in ['1080', '720', '480', '360']:
+            for f in preferred:
+                if res in f.get('format_note', ''):
+                    return f['format_id']
+        return "best"
+
+    @staticmethod
+    def download_video(url: str, format_id: str) -> str:
+        """Download video with specified format."""
+        ydl_opts = VideoProcessor.get_ytdlp_options()
+        ydl_opts.update({
+            "format": format_id,
+            "outtmpl": os.path.join(TEMP_DIR, "%(id)s.%(ext)s"),
+            "merge_output_format": "mp4",
+        })
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            return ydl.prepare_filename(info)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,9 +117,14 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming URLs."""
     url = update.message.text.strip()
     
-    # Normalize URL (remove tracking parameters)
-    if "instagram.com" in url and "?" in url:
-        url = url.split("?")[0]
+    # Normalize Instagram URLs
+    if "instagram.com" in url:
+        if "?" in url:  # Remove tracking parameters
+            url = url.split("?")[0]
+        # Convert to ddinstagram.com
+        url = f"https://ddinstagram.com/{url.split('instagram.com/')[1]}"
+    
+    # Normalize Twitter/X URLs
     if "x.com" in url:
         url = url.replace("x.com", "twitter.com")
     
@@ -126,53 +133,60 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # Get video info and formats
+        # First try with processed URL
         try:
             info, formats = VideoProcessor.get_formats_info(url)
-            duration = info.get('duration', 0)
-            
-            # Check video length
-            if duration > VERY_LONG_DURATION:
-                await update.message.reply_text("❌ Videos longer than 2 hours are not supported")
-                return
-            elif duration > LONG_VIDEO_DURATION:
-                await update.message.reply_text("⚠️ Note: This is a long video (30+ mins), processing may take extra time")
-
-            # Store basic info in context
-            context.user_data['video_info'] = {
-                'url': url,
-                'title': info.get('title', 'video')[:100],
-                'duration': duration,
-                'formats': formats,
-                'best_format': VideoProcessor.select_best_format(formats)
-            }
-
-            # Show quality options if multiple exist
-            await present_quality_options(update, context)
-
-        except yt_dlp.utils.DownloadError as e:
-            if "Private" in str(e):
-                await update.message.reply_text("🔒 This content is private and cannot be downloaded")
-            elif "Login" in str(e):
-                await update.message.reply_text("🔒 Login required - some content requires cookies to download")
+        except Exception as first_error:
+            # If failed and was Instagram, try original URL
+            if "ddinstagram.com" in url:
+                original_url = url.replace("ddinstagram.com", "instagram.com")
+                try:
+                    info, formats = VideoProcessor.get_formats_info(original_url)
+                    url = original_url  # Use original URL for download
+                except Exception as second_error:
+                    raise Exception(f"Both methods failed: {first_error} | {second_error}")
             else:
-                raise
-                
+                raise first_error
+
+        duration = info.get('duration', 0)
+        
+        # Check video length
+        if duration > VERY_LONG_DURATION:
+            await update.message.reply_text("❌ Videos longer than 2 hours are not supported")
+            return
+        elif duration > LONG_VIDEO_DURATION:
+            await update.message.reply_text("⚠️ Note: This is a long video (30+ mins), processing may take extra time")
+
+        # Store basic info in context
+        context.user_data['video_info'] = {
+            'url': url,
+            'title': info.get('title', 'video')[:100],
+            'duration': duration,
+            'formats': formats,
+            'best_format': VideoProcessor.select_best_format(formats)
+        }
+
+        # Show quality options if multiple exist
+        await present_quality_options(update, context)
+
+    except yt_dlp.utils.DownloadError as e:
+        error_msg = str(e).replace('ERROR:', '').strip()
+        await update.message.reply_text(f"❌ Download error: {error_msg}")
     except Exception as e:
         logger.error(f"URL handling error: {e}")
-        await update.message.reply_text(f"❌ Could not download this video. Error: {str(e)}")
+        await update.message.reply_text("❌ Could not download this video. It may be private or unsupported.")
+
 
 async def present_quality_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show available quality options to user."""
     formats = context.user_data['video_info']['formats']
-    url = context.user_data['video_info']['url']
     
     # Group formats by type
     video_formats = []
     audio_formats = []
     
     for f in formats:
-        if not f.get('filesize') or f.get('filesize', 0) > 500*1024*1024:  # Skip >500MB
+        if not f.get('filesize') or f.get('filesize', 0) > 500*1024*1024:
             continue
             
         if f.get('vcodec') != 'none':
@@ -182,34 +196,26 @@ async def present_quality_options(update: Update, context: ContextTypes.DEFAULT_
     
     # Create buttons
     buttons = []
-    for f in video_formats[:4]:  # Show max 4 video options
+    for f in video_formats[:4]:
         res = f.get('format_note', f.get('height', '?'))
         buttons.append([
-            InlineKeyboardButton(
-                f"🎥 {res}",
-                callback_data=f"format_{f['format_id']}")
+            InlineKeyboardButton(f"🎥 {res}", callback_data=f"format_{f['format_id']}")
         ])
     
-    for f in audio_formats[:2]:  # Show max 2 audio options
+    for f in audio_formats[:2]:
         abr = f.get('abr', '?') or f.get('tbr', '?')
         buttons.append([
-            InlineKeyboardButton(
-                f"🔊 Audio ({abr}kbps)",
-                callback_data=f"format_{f['format_id']}")
+            InlineKeyboardButton(f"🔊 Audio ({abr}kbps)", callback_data=f"format_{f['format_id']}")
         ])
     
-    # Add default option
     buttons.append([
-        InlineKeyboardButton(
-            "⚡ Auto Select Best",
-            callback_data="format_auto")
+        InlineKeyboardButton("⚡ Auto Select Best", callback_data="format_auto")
     ])
     
     # Send message with buttons
     message = await update.message.reply_text(
         "Choose video quality (or wait 30s for auto-select):",
         reply_markup=InlineKeyboardMarkup(buttons)
-    )  # THIS WAS THE MISSING PARENTHESIS
     
     # Set timeout for auto-selection
     context.job_queue.run_once(
@@ -253,10 +259,7 @@ async def quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if format_id == "auto":
         format_id = context.user_data['video_info']['best_format']
     
-    await query.edit_message_text(
-        f"⏳ Downloading with selected quality..."
-    )
-    
+    await query.edit_message_text(f"⏳ Downloading with selected quality...")
     await process_download(
         context.bot,
         query.message.chat_id,
@@ -268,7 +271,6 @@ async def quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_download(bot, chat_id, user_id, format_id):
     """Process video download with specified format."""
     try:
-        # Get stored video info
         context = ContextTypes.DEFAULT_TYPE.context_class(ApplicationBuilder().build())
         context.user_data = context.application.user_data[user_id]
         video_info = context.user_data['video_info']
