@@ -212,10 +212,11 @@ async def present_quality_options(update: Update, context: ContextTypes.DEFAULT_
         InlineKeyboardButton("⚡ Auto Select Best", callback_data="format_auto")
     ])
     
-    # Send message with buttons
+    # Send message with buttons - THIS IS THE FIXED LINE
     message = await update.message.reply_text(
         "Choose video quality (or wait 30s for auto-select):",
         reply_markup=InlineKeyboardMarkup(buttons)
+    )
     
     # Set timeout for auto-selection
     context.job_queue.run_once(
