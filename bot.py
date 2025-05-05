@@ -189,6 +189,7 @@ async def present_quality_options(update: Update, context: ContextTypes.DEFAULT_
     message = await update.message.reply_text(
         "Choose video quality (or wait 30s for auto-select):",
         reply_markup=InlineKeyboardMarkup(buttons)
+    )  # THIS WAS THE MISSING PARENTHESIS
     
     # Set timeout for auto-selection
     context.job_queue.run_once(
