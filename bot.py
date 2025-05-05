@@ -13,41 +13,35 @@ from telegram.ext import (
 )
 from yt_dlp import YoutubeDL
 
-# === Config ===
+# === Setup ===
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
 DOWNLOAD_DIR = "downloads"
 MAX_SIZE_MB = 50
 
-# === Helpers ===
-def get_formats(url):
+# === Helper Functions ===
+def get_video_formats(url):
+    """Extracts mp4 formats with resolution and audio."""
     ydl_opts = {"quiet": True}
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         formats = info.get("formats", [])
-        filtered = [
-            f for f in formats
-            if f.get("filesize") and f["ext"] == "mp4" and f.get("format_id")
-        ]
-        options = []
-        seen = set()
-        for f in filtered:
-            height = f.get("height")
-            format_id = f["format_id"]
-            label = f"{height}p" if height else f["format"]
-            if label not in seen:
-                seen.add(label)
-                options.append((label, format_id))
-        return options[:4], info
+        filtered = []
+        for f in formats:
+            if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("ext") == "mp4":
+                label = f"{f.get('format_note', '')} {f.get('height', '')}p"
+                filtered.append((label.strip(), f["format_id"]))
+        return filtered[:4], info
 
 def format_size(bytes):
     return round(bytes / (1024 * 1024), 2)
 
 def split_video(path):
+    """Splits video into ~4-minute chunks if size > 50MB."""
     output_files = []
     probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
-         "default=noprint_wrappers=1:nokey=1", path],
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", path],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT
     )
@@ -64,22 +58,25 @@ def split_video(path):
         output_files.append(out_file)
     return output_files
 
-# === Handlers ===
+# === Telegram Bot Handlers ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send me a video link to begin.")
+    await update.message.reply_text("📥 Send me a video link to download!")
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
-
     try:
-        options, info = get_formats(url)
-        duration = info.get("duration", 0)
+        options, info = get_video_formats(url)
 
+        if not options:
+            await update.message.reply_text("❌ No suitable formats found.")
+            return
+
+        duration = info.get("duration", 0)
         if duration > 7200:
-            await update.message.reply_text("❌ Extremely long video - please try a shorter one.")
+            await update.message.reply_text("❌ Video too long (>2 hours). Try a shorter one.")
             return
         elif duration > 1800:
-            await update.message.reply_text("⚠️ Long video - may take extra time.")
+            await update.message.reply_text("⚠️ This is a long video. It may take longer to process.")
 
         context.user_data["video_url"] = url
         keyboard = [
@@ -87,21 +84,20 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for label, fmt_id in options
         ]
         markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("Select the quality:", reply_markup=markup)
+        await update.message.reply_text("✅ Choose video quality:", reply_markup=markup)
 
     except Exception as e:
         logging.error(e)
-        await update.message.reply_text("❌ Failed to fetch video formats. Please check the link.")
+        await update.message.reply_text("❌ Couldn't fetch video info. Make sure the link is correct.")
 
 async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     try:
         url, fmt_id = query.data.split("|")
         file_id = str(uuid.uuid4())
-        output_path = f"{DOWNLOAD_DIR}/{file_id}.mp4"
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+        output_path = f"{DOWNLOAD_DIR}/{file_id}.mp4"
 
         ydl_opts = {
             "format": fmt_id,
@@ -109,14 +105,13 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
             "quiet": True,
         }
 
-        await query.edit_message_text("📥 Downloading...")
-
+        await query.edit_message_text("📥 Downloading your selected quality...")
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
         size = os.path.getsize(output_path) / (1024 * 1024)
         if size > MAX_SIZE_MB:
-            await query.message.reply_text(f"Video is {format_size(size)}MB – splitting into chunks...")
+            await query.message.reply_text(f"📦 Video size: {format_size(size)}MB. Splitting into chunks...")
             chunks = split_video(output_path)
             for chunk in chunks:
                 with open(chunk, "rb") as f:
@@ -129,9 +124,9 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
 
     except Exception as e:
         logging.error(e)
-        await query.message.reply_text("❌ Error during download or upload.")
+        await query.message.reply_text("❌ Error downloading or sending the video.")
 
-# === Main Entry ===
+# === Main Runner ===
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
 
