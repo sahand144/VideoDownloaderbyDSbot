@@ -139,7 +139,7 @@ if __name__ == "__main__":
     import asyncio
     import os
     token = os.getenv("BOT_TOKEN")  # Ensure this is actually set
-    Application.builder().token(token).build()
+    application = Application.builder().token(token).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
